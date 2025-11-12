@@ -12,7 +12,7 @@ using namespace std;
 // BigInt class using bit-wise manipulation with 32-bit words
 class BigInt {
 private:
-    enum { MAX_WORDS = 17 }; // 512 bits / 32 bits = 16 words + 1 for safety
+    enum { MAX_WORDS = 34 }; // 512 bits * 2 / 32 = 32 words + 2 for safety (for multiplication)
     uint32_t data[MAX_WORDS];
     int size; // number of significant words
 
@@ -257,6 +257,7 @@ public:
 
     BigInt operator*(const BigInt& other) const {
         BigInt result;
+        memset(result.data, 0, sizeof(result.data)); // Ensure all zeros
         
         for (int i = 0; i < size; i++) {
             uint64_t carry = 0;
@@ -265,13 +266,18 @@ public:
                 if (k >= MAX_WORDS) break;
                 
                 uint64_t prod = (uint64_t)data[i] * other.data[j];
-                uint64_t sum = result.data[k] + prod + carry;
+                uint64_t sum = (uint64_t)result.data[k] + prod + carry;
                 result.data[k] = (uint32_t)(sum & 0xFFFFFFFF);
                 carry = sum >> 32;
             }
             
-            if (i + other.size < MAX_WORDS && carry) {
-                result.data[i + other.size] += carry;
+            // Propagate remaining carry
+            int k = i + other.size;
+            while (carry && k < MAX_WORDS) {
+                uint64_t sum = (uint64_t)result.data[k] + carry;
+                result.data[k] = (uint32_t)(sum & 0xFFFFFFFF);
+                carry = sum >> 32;
+                k++;
             }
         }
         
@@ -401,48 +407,74 @@ public:
     }
 };
 
-// Miller-Rabin primality test
+// Miller-Rabin primality test with deterministic witnesses for better reliability
+bool millerRabinTest(const BigInt& n, const BigInt& a) {
+    if (n <= BigInt(1)) return false;
+    if (n == BigInt(2)) return true;
+    if (n.isEven()) return false;
+    
+    // Write n-1 as 2^r * d
+    BigInt d = n - BigInt(1);
+    int r = 0;
+    while (d.isEven()) {
+        d = d.shiftRight(1);
+        r++;
+    }
+    
+    // Compute a^d mod n
+    BigInt x = BigInt::powerMod(a, d, n);
+    
+    if (x == BigInt(1) || x == n - BigInt(1)) {
+        return true; // Probably prime
+    }
+    
+    // Repeatedly square x
+    for (int i = 0; i < r - 1; i++) {
+        x = BigInt::mulMod(x, x, n);
+        if (x == n - BigInt(1)) {
+            return true; // Probably prime
+        }
+        if (x == BigInt(1)) {
+            return false; // Definitely composite
+        }
+    }
+    
+    return false; // Definitely composite
+}
+
 bool millerRabin(const BigInt& n, int iterations = 20) {
     if (n < BigInt(2)) return false;
     if (n == BigInt(2) || n == BigInt(3)) return true;
     if (n.isEven()) return false;
     
-    // Write n-1 as 2^r * d (use bit shifting instead of division)
-    BigInt d = n - BigInt(1);
-    int r = 0;
-    while (d.isEven()) {
-        d = d.shiftRight(1); // Much faster than division by 2
-        r++;
+    // Use deterministic witnesses for small numbers (more reliable)
+    // These are known to be good witnesses
+    uint64_t deterministicWitnesses[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
+    int numDeterministic = 12;
+    
+    for (int i = 0; i < numDeterministic && i < iterations; i++) {
+        BigInt a(deterministicWitnesses[i]);
+        if (a >= n) break;
+        
+        if (!millerRabinTest(n, a)) {
+            return false;
+        }
     }
     
-    // Witness loop
-    for (int i = 0; i < iterations; i++) {
+    // For additional iterations, use random witnesses
+    for (int i = numDeterministic; i < iterations; i++) {
         BigInt a;
+        
+        // Generate random witness in range [2, n-2]
         if (n < BigInt(4)) {
             a = BigInt(2);
         } else {
-            // Generate random a in [2, n-2]
             BigInt range = n - BigInt(3);
             a = BigInt::random(range) + BigInt(2);
             if (a >= n - BigInt(1)) a = BigInt(2);
         }
         
-        BigInt x = BigInt::powerMod(a, d, n);
-        
-        if (x == BigInt(1) || x == n - BigInt(1)) {
-            continue;
-        }
-        
-        bool composite = true;
-        for (int j = 0; j < r - 1; j++) {
-            x = BigInt::mulMod(x, x, n);
-            if (x == n - BigInt(1)) {
-                composite = false;
-                break;
-            }
-        }
-        
-        if (composite) {
+        if (!millerRabinTest(n, a)) {
             return false;
         }
     }
