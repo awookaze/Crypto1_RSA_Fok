@@ -1,3 +1,4 @@
+#pragma GCC optimize("O3")
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -9,18 +10,15 @@
 
 using namespace std;
 
-// BigInt class using bit-wise manipulation with 32-bit words
 class BigInt {
 private:
-    // Only need space for 512-bit numbers since we do modular arithmetic
-    enum { MAX_WORDS = 17 }; // 512 bits / 32 = 16 words + 1 for safety
+    static const int MAX_WORDS = 64;
     uint32_t data[MAX_WORDS];
-    int size; // number of significant words
+    int size;
 
     void normalize() {
-        while (size > 1 && data[size - 1] == 0) {
-            size--;
-        }
+        while (size > 1 && data[size - 1] == 0) size--;
+        if (size == 0) size = 1;
     }
 
 public:
@@ -31,58 +29,44 @@ public:
     BigInt(uint64_t val) : size(1) {
         memset(data, 0, sizeof(data));
         data[0] = (uint32_t)(val & 0xFFFFFFFF);
-        data[1] = (uint32_t)(val >> 32);
-        if (data[1] != 0) size = 2;
+        if (val > 0xFFFFFFFF) {
+            data[1] = (uint32_t)(val >> 32);
+            size = 2;
+        }
+        normalize();
     }
 
+    // input format h_0*16^0 + h_1*16^1 + ... (first char is LSB)
     BigInt(const string& hex) : size(1) {
         memset(data, 0, sizeof(data));
-        fromHex(hex);
-    }
-
-    void fromHex(const string& hex) {
-        memset(data, 0, sizeof(data));
-        size = 1;
         
         if (hex.empty() || hex == "0") {
             return;
         }
         
-        // Process hex string from right to left (LSB first)
-        int bitPos = 0;
         for (int i = 0; i < (int)hex.length(); i++) {
-            char c = hex[i];
-            int val;
-            if (c >= '0' && c <= '9') val = c - '0';
-            else if (c >= 'A' && c <= 'F') val = c - 'A' + 10;
-            else if (c >= 'a' && c <= 'f') val = c - 'a' + 10;
+            char c = hex[i];  // h_i is at position i (left to right)
+            int digit;
+            if (c >= '0' && c <= '9') digit = c - '0';
+            else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+            else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
             else continue;
             
-            // Add val * 16^i
-            for (int bit = 0; bit < 4; bit++) {
-                if (val & (1 << bit)) {
-                    setBit(bitPos + bit);
+            // h_i contributes to bit positions [4*i, 4*i+3]
+            int bitPos = i * 4;
+            int wordPos = bitPos / 32;
+            int bitInWord = bitPos % 32;
+            
+            if (wordPos < MAX_WORDS) {
+                data[wordPos] |= ((uint32_t)digit << bitInWord);
+                if (bitInWord > 28 && wordPos + 1 < MAX_WORDS) {
+                    data[wordPos + 1] |= ((uint32_t)digit >> (32 - bitInWord));
                 }
             }
-            bitPos += 4;
         }
+        
+        size = MAX_WORDS;
         normalize();
-    }
-
-    void setBit(int pos) {
-        int wordIdx = pos / 32;
-        int bitIdx = pos % 32;
-        if (wordIdx < MAX_WORDS) {
-            data[wordIdx] |= (1U << bitIdx);
-            if (wordIdx >= size) size = wordIdx + 1;
-        }
-    }
-
-    bool getBit(int pos) const {
-        int wordIdx = pos / 32;
-        int bitIdx = pos % 32;
-        if (wordIdx >= size) return false;
-        return (data[wordIdx] >> bitIdx) & 1;
     }
 
     bool isZero() const {
@@ -95,6 +79,22 @@ public:
 
     bool isEven() const {
         return (data[0] & 1) == 0;
+    }
+
+    bool getBit(int pos) const {
+        int wordPos = pos / 32;
+        int bitPos = pos % 32;
+        if (wordPos >= size) return false;
+        return (data[wordPos] >> bitPos) & 1;
+    }
+
+    void setBit(int pos) {
+        int wordPos = pos / 32;
+        int bitPos = pos % 32;
+        if (wordPos < MAX_WORDS) {
+            data[wordPos] |= (1U << bitPos);
+            if (wordPos >= size) size = wordPos + 1;
+        }
     }
 
     int bitLength() const {
@@ -131,11 +131,11 @@ public:
     }
 
     bool operator<=(const BigInt& other) const {
-        return *this < other || *this == other;
+        return !(other < *this);
     }
 
     bool operator>(const BigInt& other) const {
-        return !(*this <= other);
+        return other < *this;
     }
 
     bool operator>=(const BigInt& other) const {
@@ -161,8 +161,10 @@ public:
     }
 
     BigInt operator-(const BigInt& other) const {
+        // this stuff only supports unsigned =)
+        // will be changed if needed in other exs
         if (*this < other) {
-            return BigInt(0); // Return 0 for negative results
+            return BigInt(0);
         }
         
         BigInt result;
@@ -173,7 +175,7 @@ public:
             if (i < other.size) diff -= other.data[i];
             
             if (diff < 0) {
-                diff += 0x100000000LL;
+                diff += 0x100000000LL; // eg 16^8 = 2^32
                 borrow = 1;
             } else {
                 borrow = 0;
@@ -186,7 +188,6 @@ public:
         return result;
     }
 
-    // Left shift by n bits (multiply by 2^n)
     BigInt shiftLeft(int n) const {
         if (n == 0 || isZero()) return *this;
         
@@ -194,37 +195,29 @@ public:
         int wordShift = n / 32;
         int bitShift = n % 32;
         
-        if (wordShift >= MAX_WORDS) {
-            return BigInt(0);
-        }
+        result.size = size + wordShift + (bitShift > 0 ? 1 : 0);
+        if (result.size > MAX_WORDS) result.size = MAX_WORDS;
         
-        // Shift by whole words first
-        for (int i = 0; i < size; i++) {
-            if (i + wordShift < MAX_WORDS) {
+        if (bitShift == 0) {
+            for (int i = 0; i < size && i + wordShift < MAX_WORDS; i++) {
                 result.data[i + wordShift] = data[i];
             }
-        }
-        
-        // Then shift by remaining bits
-        if (bitShift > 0) {
-            uint32_t carry = 0;
-            for (int i = wordShift; i < size + wordShift && i < MAX_WORDS; i++) {
-                uint64_t temp = ((uint64_t)result.data[i] << bitShift) | carry;
-                result.data[i] = (uint32_t)(temp & 0xFFFFFFFF);
-                carry = (uint32_t)(temp >> 32);
+        } else {
+            uint64_t carry = 0;
+            for (int i = 0; i < size && i + wordShift < MAX_WORDS; i++) {
+                uint64_t temp = ((uint64_t)data[i] << bitShift) | carry;
+                result.data[i + wordShift] = (uint32_t)(temp & 0xFFFFFFFF);
+                carry = temp >> 32;
             }
-            if (size + wordShift < MAX_WORDS && carry) {
-                result.data[size + wordShift] = carry;
+            if (wordShift + size < MAX_WORDS && carry) {
+                result.data[wordShift + size] = (uint32_t)carry;
             }
         }
         
-        int newSize = size + wordShift + (bitShift > 0 ? 1 : 0);
-        result.size = (newSize < MAX_WORDS) ? newSize : MAX_WORDS;
         result.normalize();
         return result;
     }
 
-    // Right shift by n bits (divide by 2^n)
     BigInt shiftRight(int n) const {
         if (n == 0 || isZero()) return *this;
         
@@ -236,12 +229,10 @@ public:
             return BigInt(0);
         }
         
-        // Shift by whole words first
         for (int i = wordShift; i < size; i++) {
             result.data[i - wordShift] = data[i];
         }
         
-        // Then shift by remaining bits
         if (bitShift > 0) {
             for (int i = 0; i < size - wordShift; i++) {
                 result.data[i] = result.data[i] >> bitShift;
@@ -256,9 +247,27 @@ public:
         return result;
     }
 
+    BigInt operator*(const BigInt& other) const {
+        BigInt result;
+        result.size = min(size + other.size, MAX_WORDS);
+        
+        for (int i = 0; i < size && i < MAX_WORDS; i++) {
+            uint64_t carry = 0;
+            for (int j = 0; j < other.size && i + j < MAX_WORDS; j++) {
+                uint64_t prod = (uint64_t)data[i] * other.data[j];
+                uint64_t sum = (uint64_t)result.data[i + j] + prod + carry;
+                result.data[i + j] = (uint32_t)(sum & 0xFFFFFFFF);
+                carry = sum >> 32;
+            }
+            if (i + other.size < MAX_WORDS && carry) {
+                result.data[i + other.size] += (uint32_t)carry;
+            }
+        }
+        
+        result.normalize();
+        return result;
+    }
 
-
-    // Division and modulo - optimized version
     void divMod(const BigInt& divisor, BigInt& quotient, BigInt& remainder) const {
         quotient = BigInt(0);
         remainder = BigInt(0);
@@ -269,39 +278,42 @@ public:
             return;
         }
         
-        // Handle special case where divisor is 1
         if (divisor.isOne()) {
             quotient = *this;
             return;
         }
         
-        // Optimized: process multiple bits when possible
-        BigInt dividend = *this;
-        BigInt div = divisor;
-        
-        // Find how many bits we need to process
-        int dividendBits = dividend.bitLength();
-        int divisorBits = div.bitLength();
-        
-        if (dividendBits < divisorBits) {
-            remainder = *this;
+        // Fast path: single-word divisor
+        if (divisor.size == 1 && divisor.data[0] != 0) {
+            uint64_t div = divisor.data[0];
+            uint64_t rem = 0;
+            
+            quotient.size = size;
+            for (int i = size - 1; i >= 0; i--) {
+                rem = (rem << 32) | data[i];
+                quotient.data[i] = (uint32_t)(rem / div);
+                rem = rem % div;
+            }
+            quotient.normalize();
+            
+            remainder.data[0] = (uint32_t)rem;
+            remainder.size = 1;
+            remainder.normalize();
             return;
         }
         
-        // Start from the most significant bit
+        // Binary long division for multi-word
+        int dividendBits = bitLength();
+        
         for (int i = dividendBits - 1; i >= 0; i--) {
             remainder = remainder.shiftLeft(1);
-            if (dividend.getBit(i)) {
+            if (getBit(i)) {
                 remainder.data[0] |= 1;
-                if (remainder.size == 1 && remainder.data[0] == 1) {
-                    remainder.size = 1; // Keep normalized
-                } else {
-                    remainder.normalize();
-                }
+                remainder.normalize();
             }
             
-            if (remainder >= div) {
-                remainder = remainder - div;
+            if (remainder >= divisor) {
+                remainder = remainder - divisor;
                 quotient.setBit(i);
             }
         }
@@ -322,104 +334,26 @@ public:
         return r;
     }
 
-    // Modular addition: (a + b) mod n
+    // Modular addition with single reduction
     static BigInt addMod(const BigInt& a, const BigInt& b, const BigInt& n) {
         BigInt result = a + b;
         if (result >= n) {
-            result = result % n;
+            result = result - n;
         }
         return result;
     }
 
-    // Helper structure for extended multiplication
-    struct ExtendedBigInt {
-        static const int EXT_MAX_WORDS = 34;
-        uint32_t data[EXT_MAX_WORDS];
-        int size;
-        
-        ExtendedBigInt() : size(1) {
-            memset(data, 0, sizeof(data));
-        }
-        
-        void normalize() {
-            while (size > 1 && data[size - 1] == 0) {
-                size--;
-            }
-        }
-        
-        bool getBit(int pos) const {
-            int wordIdx = pos / 32;
-            int bitIdx = pos % 32;
-            if (wordIdx >= size) return false;
-            return (data[wordIdx] >> bitIdx) & 1;
-        }
-        
-        int bitLength() const {
-            if (size == 1 && data[0] == 0) return 0;
-            int len = (size - 1) * 32;
-            uint32_t top = data[size - 1];
-            while (top > 0) {
-                len++;
-                top >>= 1;
-            }
-            return len;
-        }
-    };
-    
-    // Modular multiplication: (a * b) mod n using extended buffer
+    // Modular multiplication using optimized multiplication + reduction
     static BigInt mulMod(const BigInt& a, const BigInt& b, const BigInt& n) {
         if (n.isOne()) return BigInt(0);
         
-        // Multiply into extended buffer
-        ExtendedBigInt product;
+        // Use optimized multiplication
+        BigInt product = a * b;
         
-        for (int i = 0; i < a.size; i++) {
-            uint64_t carry = 0;
-            for (int j = 0; j < b.size; j++) {
-                int k = i + j;
-                if (k >= ExtendedBigInt::EXT_MAX_WORDS) break;
-                
-                uint64_t prod = (uint64_t)a.data[i] * b.data[j];
-                uint64_t sum = (uint64_t)product.data[k] + prod + carry;
-                product.data[k] = (uint32_t)(sum & 0xFFFFFFFF);
-                carry = sum >> 32;
-            }
-            
-            int k = i + b.size;
-            while (carry && k < ExtendedBigInt::EXT_MAX_WORDS) {
-                uint64_t sum = (uint64_t)product.data[k] + carry;
-                product.data[k] = (uint32_t)(sum & 0xFFFFFFFF);
-                carry = sum >> 32;
-                k++;
-            }
-        }
-        
-        product.size = a.size + b.size;
-        if (product.size > ExtendedBigInt::EXT_MAX_WORDS) {
-            product.size = ExtendedBigInt::EXT_MAX_WORDS;
-        }
-        product.normalize();
-        
-        // Perform modulo using long division
-        BigInt quotient, remainder;
-        
-        int productBits = product.bitLength();
-        for (int i = productBits - 1; i >= 0; i--) {
-            remainder = remainder.shiftLeft(1);
-            if (product.getBit(i)) {
-                remainder.data[0] |= 1;
-                remainder.normalize();
-            }
-            
-            if (remainder >= n) {
-                remainder = remainder - n;
-            }
-        }
-        
-        return remainder;
+        // Fast reduction for result
+        return product % n;
     }
 
-    // Modular exponentiation: (base^exp) mod n
     static BigInt powerMod(const BigInt& base, const BigInt& exp, const BigInt& n) {
         if (n.isOne()) return BigInt(0);
         
@@ -437,7 +371,7 @@ public:
         return result;
     }
 
-    // Generate random BigInt with similar bit length
+    // Generate random BigInt
     static BigInt random(const BigInt& n) {
         BigInt result;
         int bits = n.bitLength();
@@ -455,41 +389,50 @@ public:
         
         return result;
     }
+
+    friend ostream& operator<<(ostream& os, const BigInt& n);
 };
 
-// Miller-Rabin primality test with deterministic witnesses for better reliability
+ostream& operator<<(ostream& os, const BigInt& n) {
+    os << hex;
+    os << n.data[n.size - 1];
+    for (int i = n.size - 2; i >= 0; i--) {
+        os.width(8);
+        os.fill('0');
+        os << n.data[i];
+    }
+    os << dec;
+    return os;
+}
+
+// Miller-Rabin test
 bool millerRabinTest(const BigInt& n, const BigInt& a) {
-    if (n <= BigInt(1)) return false;
-    if (n == BigInt(2)) return true;
-    if (n.isEven()) return false;
+    BigInt n_minus_1 = n - BigInt(1);
     
-    // Write n-1 as 2^r * d
-    BigInt d = n - BigInt(1);
-    int r = 0;
+    int s = 0;
+    BigInt d = n_minus_1;
     while (d.isEven()) {
+        s++;
         d = d.shiftRight(1);
-        r++;
     }
     
-    // Compute a^d mod n
     BigInt x = BigInt::powerMod(a, d, n);
     
-    if (x == BigInt(1) || x == n - BigInt(1)) {
-        return true; // Probably prime
+    if (x == BigInt(1) || x == n_minus_1) {
+        return true;
     }
     
-    // Repeatedly square x
-    for (int i = 0; i < r - 1; i++) {
+    for (int i = 0; i < s - 1; i++) {
         x = BigInt::mulMod(x, x, n);
-        if (x == n - BigInt(1)) {
-            return true; // Probably prime
+        if (x == n_minus_1) {
+            return true;
         }
         if (x == BigInt(1)) {
-            return false; // Definitely composite
+            return false;
         }
     }
     
-    return false; // Definitely composite
+    return false;
 }
 
 bool millerRabin(const BigInt& n, int iterations = 20) {
@@ -497,10 +440,9 @@ bool millerRabin(const BigInt& n, int iterations = 20) {
     if (n == BigInt(2) || n == BigInt(3)) return true;
     if (n.isEven()) return false;
     
-    // Use deterministic witnesses for small numbers (more reliable)
-    // These are known to be good witnesses
+    // Deterministic witnesses for better reliability
     uint64_t deterministicWitnesses[] = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37};
-    int numDeterministic = 12;
+    int numDeterministic = sizeof(deterministicWitnesses) / sizeof(deterministicWitnesses[0]);
     
     for (int i = 0; i < numDeterministic && i < iterations; i++) {
         BigInt a(deterministicWitnesses[i]);
@@ -511,11 +453,10 @@ bool millerRabin(const BigInt& n, int iterations = 20) {
         }
     }
     
-    // For additional iterations, use random witnesses
+    // Random witnesses for additional iterations
     for (int i = numDeterministic; i < iterations; i++) {
         BigInt a;
         
-        // Generate random witness in range [2, n-2]
         if (n < BigInt(4)) {
             a = BigInt(2);
         } else {
@@ -532,12 +473,10 @@ bool millerRabin(const BigInt& n, int iterations = 20) {
     return true;
 }
 
-// Small primes for trial division
+// Trial division for small primes
 bool trialDivision(const BigInt& n) {
-    // Quick checks for small primes
     if (n == BigInt(2) || n == BigInt(3) || n == BigInt(5) || n == BigInt(7)) return true;
     
-    // Check divisibility by small primes (avoid expensive modulo for tiny numbers)
     int smallPrimes[] = {3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97};
     
     for (int p : smallPrimes) {
@@ -553,49 +492,44 @@ bool isPrime(const BigInt& n) {
     if (n == BigInt(2)) return true;
     if (n.isEven()) return false;
     
-    // Trial division with small primes
     if (!trialDivision(n)) return false;
     
-    // Miller-Rabin test with fewer iterations (10 gives error < 2^-40)
-    return millerRabin(n, 40);
+    return millerRabin(n, 20);
 }
 
 int main(int argc, char* argv[]) {
+    srand(time(0));
+    
     if (argc != 3) {
         cerr << "Usage: " << argv[0] << " <input_file> <output_file>" << endl;
         return 1;
     }
     
-    srand(time(NULL));
-    
-    string inputFile = argv[1];
-    string outputFile = argv[2];
-    
-    ifstream fin(inputFile);
-    if (!fin) {
-        cerr << "Cannot open input file: " << inputFile << endl;
+    ifstream inFile(argv[1]);
+    if (!inFile) {
+        cerr << "Cannot open input file: " << argv[1] << endl;
         return 1;
     }
     
-    string hexNumber;
-    getline(fin, hexNumber);
-    fin.close();
+    string hexString;
+    getline(inFile, hexString);
+    inFile.close();
     
     // Remove whitespace
-    hexNumber.erase(remove_if(hexNumber.begin(), hexNumber.end(), ::isspace), hexNumber.end());
+    hexString.erase(remove_if(hexString.begin(), hexString.end(), ::isspace), hexString.end());
     
-    BigInt num(hexNumber);
+    BigInt n(hexString);
     
-    bool prime = isPrime(num);
+    bool result = isPrime(n);
     
-    ofstream fout(outputFile);
-    if (!fout) {
-        cerr << "Cannot open output file: " << outputFile << endl;
+    ofstream outFile(argv[2]);
+    if (!outFile) {
+        cerr << "Cannot open output file: " << argv[2] << endl;
         return 1;
     }
     
-    fout << (prime ? 1 : 0) << endl;
-    fout.close();
+    outFile << (result ? "1" : "0") << endl;
+    outFile.close();
     
     return 0;
 }
