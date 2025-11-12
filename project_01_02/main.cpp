@@ -521,16 +521,45 @@ BigInt modInverse(const BigInt& e, const BigInt& phi) {
     return s0 % phi;
 }
 
-int main() {
+int main(int argc, char* argv[]) {
     srand((unsigned int)time(0));
 
+    // Check command line arguments
+    if (argc != 3) {
+        cerr << "Usage: " << argv[0] << " <input_file> <output_file>" << endl;
+        return 1;
+    }
+
+    // Open input file
+    ifstream inFile(argv[1]);
+    if (!inFile) {
+        cerr << "Error: Cannot open input file " << argv[1] << endl;
+        return 1;
+    }
+
+    // Open output file
+    ofstream outFile(argv[2]);
+    if (!outFile) {
+        cerr << "Error: Cannot open output file " << argv[2] << endl;
+        return 1;
+    }
+
+    // Read p, q, e from input file
     BigInt p, q, e;
-    cin >> p >> q >> e;
+    inFile >> p >> q >> e;
+    inFile.close();
+
+    // Compute private key d
     BigInt d = modInverse(e, phi_euler(p, q));
+    
+    // Write result to output file
     if (d.isZero()) {
-        cout << -1 << endl;
+        outFile << -1 << endl;
     }
     else {
-        cout << d << endl;
+        outFile << d << endl;
     }
+    
+    outFile.close();
+    return 0;
 }
